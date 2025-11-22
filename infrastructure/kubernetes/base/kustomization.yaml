@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kinatrax-system
+
+commonLabels:
+  app.kubernetes.io/part-of: kinatrax-cloud-pipeline
+  app.kubernetes.io/managed-by: kustomize
+
+resources:
+  - namespace.yaml
+  - api-deployment.yaml
+  - api-service.yaml
+  - processor-deployment.yaml
+  - gcas-deployment.yaml
+  - redis-deployment.yaml
+  - redis-service.yaml
+  - postgres-deployment.yaml
+  - postgres-service.yaml
+  - kafka-deployment.yaml
+  - kafka-service.yaml
+  - configmap.yaml
+  - serviceaccount.yaml
+  - rbac.yaml

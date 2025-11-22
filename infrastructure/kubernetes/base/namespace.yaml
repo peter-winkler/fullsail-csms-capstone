@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kinatrax-system
+  labels:
+    name: kinatrax-system
+    app.kubernetes.io/name: kinatrax-cloud-pipeline
+    app.kubernetes.io/component: system

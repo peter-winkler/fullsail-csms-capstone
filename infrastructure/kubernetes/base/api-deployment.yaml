@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kinatrax-api
+  labels:
+    app.kubernetes.io/name: kinatrax-api
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kinatrax-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kinatrax-api
+        app.kubernetes.io/component: api
+    spec:
+      serviceAccountName: kinatrax-api
+      containers:
+      - name: api
+        image: kinatrax/api:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: database-url
+        - name: REDIS_URL
+          value: redis://redis:6379
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: kafka:9092
+        - name: LOG_LEVEL
+          value: info
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5

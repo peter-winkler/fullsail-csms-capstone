@@ -1,0 +1,23 @@
+[project]
+name = "kinatrax-ml"
+version = "0.1.0"
+description = "Machine learning models for predictive resource scaling and intelligent model selection"
+requires-python = ">=3.12"
+dependencies = [
+    "scikit-learn>=1.4.0",
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    "matplotlib>=3.8.0",
+    "seaborn>=0.13.0",
+    "joblib>=1.3.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.1.0",
+    "structlog>=24.1.0",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "jupyter>=1.0.0",
+    "ipython>=8.20.0",
+    "notebook>=7.0.0",
+]

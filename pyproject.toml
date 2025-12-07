@@ -15,7 +15,8 @@ members = [
     "src/processor",
     "src/gcas",
     "src/common",
-    "src/ml"
+    "src/ml",
+    "src/dashboard",
 ]
 
 [tool.uv]

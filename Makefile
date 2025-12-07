@@ -1,4 +1,4 @@
-.PHONY: help install dev-up dev-down test lint format clean k8s-apply tf-plan tf-apply
+.PHONY: help install dev-up dev-down test lint format clean k8s-apply tf-plan tf-apply dashboard dashboard-docker
 
 # Default target
 help:
@@ -7,6 +7,10 @@ help:
 	@echo "Setup & Dependencies:"
 	@echo "  make install       Install all project dependencies using uv"
 	@echo "  make install-dev   Install development dependencies"
+	@echo ""
+	@echo "Dashboard:"
+	@echo "  make dashboard     Run dashboard locally (streamlit)"
+	@echo "  make dashboard-docker  Run dashboard in Docker"
 	@echo ""
 	@echo "Local Development:"
 	@echo "  make dev-up        Start local development environment (docker-compose)"
@@ -98,6 +102,14 @@ tf-apply:
 
 tf-destroy:
 	cd infrastructure/terraform/environments/dev && terraform destroy
+
+# Dashboard
+dashboard:
+	cd src/dashboard && uv run streamlit run app/main.py
+
+dashboard-docker:
+	docker-compose up dashboard --build
+	@echo "Dashboard available at: http://localhost:8501"
 
 # Cleanup
 clean:

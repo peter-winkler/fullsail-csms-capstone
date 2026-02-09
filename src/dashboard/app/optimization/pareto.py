@@ -1,155 +1,201 @@
-"""Pareto frontier optimization for cost vs. time trade-offs.
+"""Pareto frontier optimization algorithms."""
 
-The Pareto frontier represents the set of configurations where no other
-configuration is better in BOTH cost AND time. These are the "optimal"
-trade-off points that decision makers should consider.
-"""
-
-import sys
-from pathlib import Path
-
-# Add app directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
 
-from data.schemas import ParetoPoint
+from data.schemas import CloudCostModel, Event, ParetoPoint, SiteProfile
+from simulation.scheduler import schedule_lpt
 
 
-def compute_pareto_frontier(points: List[ParetoPoint]) -> List[ParetoPoint]:
+def is_dominated(point: Tuple[float, float], other: Tuple[float, float]) -> bool:
+    """Check if 'point' is dominated by 'other'.
+
+    A point is dominated if another point is better or equal in all objectives
+    and strictly better in at least one objective.
+
+    For minimization of both cost and time:
+    - point is dominated by other if:
+      other.cost <= point.cost AND other.time <= point.time
+      AND (other.cost < point.cost OR other.time < point.time)
     """
-    Identify Pareto-optimal points in the cost-time trade-off space.
+    cost_better_or_equal = other[0] <= point[0]
+    time_better_or_equal = other[1] <= point[1]
+    strictly_better = other[0] < point[0] or other[1] < point[1]
 
-    A point is Pareto-optimal if no other point is better in both
-    cost AND time. This is a classic multi-objective optimization problem.
+    return cost_better_or_equal and time_better_or_equal and strictly_better
 
-    Algorithm: Simple pairwise dominance check O(n^2)
-    For production with larger datasets, consider NSGA-II or scipy.optimize.
+
+def compute_pareto_frontier(
+    points: List[Tuple[str, float, float]]
+) -> List[ParetoPoint]:
+    """Compute the Pareto frontier from a list of (config_id, cost, time) tuples.
+
+    Algorithm complexity: O(n^2) where n is the number of points.
 
     Args:
-        points: List of ParetoPoint configurations to evaluate
+        points: List of (config_id, cost, time) tuples
 
     Returns:
-        The same list with is_pareto_optimal and scores updated
+        List of ParetoPoint objects with is_pareto_optimal flag set
     """
-    if not points:
-        return []
-
-    # Extract cost and time arrays
-    costs = np.array([p.total_cost for p in points])
-    times = np.array([p.total_hours for p in points])
-
     n = len(points)
-    is_pareto = np.ones(n, dtype=bool)
+    pareto_optimal = [True] * n
 
     for i in range(n):
-        if not is_pareto[i]:
+        if not pareto_optimal[i]:
             continue
+
         for j in range(n):
             if i == j:
                 continue
-            # Check if j dominates i (j is better in both dimensions)
-            if costs[j] <= costs[i] and times[j] <= times[i]:
-                if costs[j] < costs[i] or times[j] < times[i]:
-                    is_pareto[i] = False
-                    break
 
-    # Mark Pareto-optimal points
-    for i, point in enumerate(points):
-        point.is_pareto_optimal = bool(is_pareto[i])
+            point_i = (points[i][1], points[i][2])  # (cost, time)
+            point_j = (points[j][1], points[j][2])
 
-    # Calculate normalized scores (0-1, higher is better)
-    cost_min, cost_max = float(costs.min()), float(costs.max())
-    time_min, time_max = float(times.min()), float(times.max())
+            if is_dominated(point_i, point_j):
+                pareto_optimal[i] = False
+                break
 
-    for i, point in enumerate(points):
-        # Invert: lower is better, so (max - val) / range = higher score
-        if cost_max > cost_min:
-            point.cost_score = (cost_max - costs[i]) / (cost_max - cost_min)
-        else:
-            point.cost_score = 1.0
+    result = []
+    for i, (config_id, cost, time) in enumerate(points):
+        result.append(ParetoPoint(
+            config_id=config_id,
+            cost=cost,
+            time=time,
+            is_pareto_optimal=pareto_optimal[i]
+        ))
 
-        if time_max > time_min:
-            point.time_score = (time_max - times[i]) / (time_max - time_min)
-        else:
-            point.time_score = 1.0
+    return result
 
-    return points
+
+def compute_pareto_frontier_numpy(
+    costs: np.ndarray,
+    times: np.ndarray,
+    config_ids: List[str]
+) -> List[ParetoPoint]:
+    """Vectorized Pareto frontier computation using NumPy.
+
+    More efficient for large datasets.
+
+    Args:
+        costs: Array of cost values
+        times: Array of time values
+        config_ids: List of configuration IDs
+
+    Returns:
+        List of ParetoPoint objects
+    """
+    n = len(costs)
+    pareto_optimal = np.ones(n, dtype=bool)
+
+    for i in range(n):
+        if not pareto_optimal[i]:
+            continue
+
+        cost_better = costs <= costs[i]
+        time_better = times <= times[i]
+        strictly_better = (costs < costs[i]) | (times < times[i])
+
+        dominates = cost_better & time_better & strictly_better
+        dominates[i] = False
+
+        if np.any(dominates):
+            pareto_optimal[i] = False
+
+    result = []
+    for i in range(n):
+        result.append(ParetoPoint(
+            config_id=config_ids[i],
+            cost=float(costs[i]),
+            time=float(times[i]),
+            is_pareto_optimal=bool(pareto_optimal[i])
+        ))
+
+    return result
+
+
+def calculate_weighted_score(
+    cost: float,
+    time: float,
+    cost_weight: float,
+    cost_range: Tuple[float, float],
+    time_range: Tuple[float, float]
+) -> float:
+    """Calculate weighted score for a configuration.
+
+    Normalizes cost and time to [0, 1] range and computes weighted sum.
+    Lower score is better.
+    """
+    time_weight = 1.0 - cost_weight
+
+    cost_norm = (cost - cost_range[0]) / (cost_range[1] - cost_range[0] + 1e-10)
+    time_norm = (time - time_range[0]) / (time_range[1] - time_range[0] + 1e-10)
+
+    return cost_weight * cost_norm + time_weight * time_norm
 
 
 def find_optimal_configuration(
-    points: List[ParetoPoint],
-    cost_weight: float = 0.5,
-    time_weight: float = 0.5,
-    max_cost: Optional[float] = None,
-    max_time: Optional[float] = None,
-) -> Optional[ParetoPoint]:
-    """
-    Find the best configuration given user preferences.
-
-    Uses weighted scoring to balance cost and time preferences,
-    with optional hard constraints on maximum acceptable values.
+    pareto_points: List[ParetoPoint],
+    cost_weight: float = 0.5
+) -> ParetoPoint:
+    """Find the optimal configuration from Pareto-optimal points based on weights.
 
     Args:
-        points: List of possible configurations (should be Pareto-computed)
-        cost_weight: How much to weight cost savings (0-1)
-        time_weight: How much to weight time savings (0-1)
-        max_cost: Optional budget constraint (USD)
-        max_time: Optional deadline constraint (hours)
+        pareto_points: List of Pareto points (should be filtered to optimal only)
+        cost_weight: Weight for cost optimization (0 = prioritize time, 1 = prioritize cost)
 
     Returns:
-        The optimal ParetoPoint based on weighted scoring, or None if
-        no configuration meets the constraints
+        The optimal ParetoPoint based on weighted scoring
     """
-    if not points:
-        return None
+    optimal_only = [p for p in pareto_points if p.is_pareto_optimal]
 
-    # Normalize weights
-    total_weight = cost_weight + time_weight
-    if total_weight == 0:
-        cost_weight = 0.5
-        time_weight = 0.5
-    else:
-        cost_weight = cost_weight / total_weight
-        time_weight = time_weight / total_weight
+    if not optimal_only:
+        return pareto_points[0] if pareto_points else None
 
-    # Filter by constraints
-    candidates = points.copy()
-    if max_cost is not None:
-        candidates = [p for p in candidates if p.total_cost <= max_cost]
-    if max_time is not None:
-        candidates = [p for p in candidates if p.total_hours <= max_time]
+    costs = [p.cost for p in optimal_only]
+    times = [p.time for p in optimal_only]
 
-    if not candidates:
-        return None
+    cost_range = (min(costs), max(costs))
+    time_range = (min(times), max(times))
 
-    # Calculate weighted score for each candidate
-    best: Optional[ParetoPoint] = None
-    best_score = -1.0
+    best_point = None
+    best_score = float('inf')
 
-    for point in candidates:
-        score = (cost_weight * point.cost_score) + (time_weight * point.time_score)
-        if score > best_score:
+    for point in optimal_only:
+        score = calculate_weighted_score(
+            point.cost, point.time, cost_weight, cost_range, time_range
+        )
+        if score < best_score:
             best_score = score
-            best = point
+            best_point = point
 
-    return best
+    return best_point
 
 
-def calculate_pareto_frontier_line(
-    points: List[ParetoPoint],
-) -> List[Tuple[float, float]]:
-    """
-    Return the points that form the Pareto frontier line for plotting.
+def generate_cloud_sweep(
+    events: List[Event],
+    site: SiteProfile,
+    cloud_model: CloudCostModel,
+    max_cloud_containers: int = 50,
+    step: int = 1,
+) -> List[Tuple[str, float, float]]:
+    """Sweep cloud container count from 0 to max, generating (config_id, cost, time) tuples.
 
-    Args:
-        points: List of ParetoPoints with is_pareto_optimal computed
+    Each point runs the LPT scheduler with a fixed number of on-prem GPUs
+    (from the site profile) and a varying number of cloud containers.
+
+    C=0: pure on-prem baseline ($0 cloud cost, longest turnaround)
+    C=max: maximum cloud acceleration (highest cost, shortest turnaround)
 
     Returns:
-        List of (cost, time) tuples sorted by cost (low to high)
+        List of (config_id, cloud_cost, turnaround_time_sec) tuples
+        suitable for compute_pareto_frontier().
     """
-    pareto_points = [p for p in points if p.is_pareto_optimal]
-    sorted_points = sorted(pareto_points, key=lambda p: p.total_cost)
-    return [(p.total_cost, p.total_hours) for p in sorted_points]
+    points: List[Tuple[str, float, float]] = []
+
+    for c in range(0, max_cloud_containers + 1, step):
+        result = schedule_lpt(events, site, c, cloud_model)
+        points.append((result.config_id, result.cloud_cost, result.turnaround_time_sec))
+
+    return points

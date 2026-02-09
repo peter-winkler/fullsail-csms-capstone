@@ -1,134 +1,130 @@
-"""KinaTrax Decision Support Dashboard - Main Entry Point."""
+"""KinaTrax Cloud Acceleration Dashboard - Main Entry Point.
 
+Run with: streamlit run main.py
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import pandas as pd
 import streamlit as st
 
 from config import settings
-from data import generate_event_queue
-from data.schemas import JobStatus
+from data.loaders import load_onprem_results, SITE_GPU_COUNTS, PRESET_SITE_PROFILES
 
-# Page configuration
 st.set_page_config(
-    page_title="KinaTrax Decision Support Dashboard",
+    page_title=settings.app_name,
     page_icon=":baseball:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Initialize session state
-if "queue_data" not in st.session_state:
-    st.session_state.queue_data = generate_event_queue(settings.default_queue_size)
 
-if "cost_weight" not in st.session_state:
-    st.session_state.cost_weight = 0.5
+@st.cache_data
+def load_events():
+    return load_onprem_results()
 
 
 def main() -> None:
-    """Main dashboard home page."""
-    st.title(":baseball: KinaTrax Decision Support Dashboard")
+    st.title(":baseball: KinaTrax Cloud Acceleration Dashboard")
 
     st.markdown(
         """
-    Welcome to the **KinaTrax Decision Support Dashboard**. This interface helps
-    Data Processing Engineers optimize job configuration by visualizing
-    cost vs. time trade-offs for biomechanical analysis processing.
+    This dashboard helps Data Processing Engineers evaluate the cost-benefit
+    trade-offs of supplementing on-premises GPU processing with cloud containers.
 
-    ### Navigate using the sidebar to:
-    1. **Event Queue** - View current processing jobs
-    2. **Cost-Time Tradeoff** - Analyze Pareto-optimal configurations
-    3. **Scenario Comparison** - Compare on-prem vs cloud vs hybrid
-    4. **Job Configuration** - Configure new processing jobs
-    5. **C3D Verification** - Verify output equivalence between systems
+    ### Pages
+    1. **Pareto Frontier** - Visualize cost vs. turnaround trade-offs for a site
+    2. **Site Comparison** - Compare frontiers across GPU-poor, moderate, and rich sites
+    3. **Batch Detail** - Inspect per-event scheduling assignments
+    4. **Cost Model** - Sensitivity analysis for cloud pricing parameters
     """
     )
 
     st.divider()
 
-    # Quick metrics from current queue
-    jobs = st.session_state.queue_data
-    queued = len([j for j in jobs if j.status == JobStatus.QUEUED])
-    processing = len([j for j in jobs if j.status == JobStatus.PROCESSING])
-    completed = len([j for j in jobs if j.status == JobStatus.COMPLETED])
+    events = load_events()
 
-    # Calculate average processing time from completed jobs
-    completed_jobs = [j for j in jobs if j.status == JobStatus.COMPLETED]
-    if completed_jobs and all(j.started_at and j.completed_at for j in completed_jobs):
-        avg_hours = sum(
-            (j.completed_at - j.started_at).total_seconds() / 3600
-            for j in completed_jobs
-            if j.started_at and j.completed_at
-        ) / len(completed_jobs)
-    else:
-        avg_hours = 4.2  # Default estimate
-
-    # Display metrics
-    st.subheader("Current Queue Status")
+    # Key metrics
+    st.subheader("On-Prem Data Summary")
 
     col1, col2, col3, col4 = st.columns(4)
-
     with col1:
-        st.metric(
-            label="Jobs in Queue",
-            value=str(queued),
-            delta=f"+{queued}" if queued > 0 else None,
-            help="Number of jobs waiting to be processed",
-        )
-
+        st.metric("Events Loaded", len(events))
     with col2:
-        st.metric(
-            label="Currently Processing",
-            value=str(processing),
-            delta=None,
-            help="Number of jobs actively being processed",
-        )
-
+        avg_time = sum(e.processing_time_sec for e in events) / len(events)
+        st.metric("Avg Processing Time", f"{avg_time / 60:.1f} min")
     with col3:
-        st.metric(
-            label="Avg. Processing Time",
-            value=f"{avg_hours:.1f} hrs",
-            delta="-0.8 hrs" if avg_hours < 5 else "+0.5 hrs",
-            delta_color="inverse",
-            help="Average time to process a game",
-        )
-
+        batting = len([e for e in events if e.event_type == "Batting"])
+        st.metric("Batting Events", batting)
     with col4:
-        st.metric(
-            label="C3D Match Rate",
-            value="100%",
-            delta="0%",
-            help="Percentage of jobs with matching C3D outputs",
-        )
+        pitching = len([e for e in events if e.event_type == "Pitching"])
+        st.metric("Pitching Events", pitching)
 
+    # Processing time range
     st.divider()
-
-    # System status
-    st.subheader("System Configuration")
-
-    col1, col2 = st.columns(2)
+    col1, col2, col3, col4 = st.columns(4)
+    times = [e.processing_time_sec for e in events]
 
     with col1:
-        st.info(
-            f"""
-        **Data Source:** {'Mock Data' if settings.use_mock_data else 'Live API'}
-        **API Endpoint:** {settings.api_base_url}
-        **Version:** {settings.app_version}
-        """
-        )
-
+        st.metric("Min Time", f"{min(times) / 60:.1f} min")
     with col2:
-        st.success(
-            """
-        **On-Premises Status:** Connected
-        **AWS Status:** Available
-        **Monitoring:** Active
-        """
-        )
+        st.metric("Max Time", f"{max(times) / 60:.1f} min")
+    with col3:
+        fps_300 = [e for e in events if e.fps == 300]
+        if fps_300:
+            avg_300 = sum(e.processing_time_sec for e in fps_300) / len(fps_300)
+            st.metric("300fps Avg", f"{avg_300 / 60:.1f} min")
+        else:
+            st.metric("300fps Avg", "N/A")
+    with col4:
+        fps_600 = [e for e in events if e.fps == 600]
+        if fps_600:
+            avg_600 = sum(e.processing_time_sec for e in fps_600) / len(fps_600)
+            st.metric("600fps Avg", f"{avg_600 / 60:.1f} min")
+        else:
+            st.metric("600fps Avg", "N/A")
+
+    # Venue distribution
+    st.divider()
+    st.subheader("Events by Venue")
+
+    venue_counts = {}
+    for e in events:
+        venue_counts[e.venue] = venue_counts.get(e.venue, 0) + 1
+
+    df_venues = pd.DataFrame([
+        {"Venue": v, "Events": c} for v, c in sorted(venue_counts.items(), key=lambda x: -x[1])
+    ])
+    st.dataframe(df_venues, use_container_width=True, hide_index=True)
+
+    # Site GPU profiles
+    st.divider()
+    st.subheader("MLB Site GPU Configurations")
+
+    df_sites = pd.DataFrame([
+        {
+            "Site": s.name,
+            "Code": s.venue_code,
+            "GPUs": s.available_gpus,
+            "Tier": s.tier.replace("_", " ").title(),
+        }
+        for s in PRESET_SITE_PROFILES
+    ])
+    st.dataframe(df_sites, use_container_width=True, hide_index=True)
+
+    st.caption(
+        f"Data: {len(SITE_GPU_COUNTS)} MLB organizations, "
+        f"range 0-93 active GPUs. "
+        f"Source: Controllers/Containers spreadsheet (Feb 2026)."
+    )
 
     # Footer
     st.divider()
-    st.caption(
-        "KinaTrax Decision Support Dashboard v0.1.0 | "
-        "Full Sail University CSMS Capstone Project"
-    )
+    st.caption(f"{settings.app_name} v{settings.app_version} | "
+               "Full Sail University CSMS Capstone Project")
 
 
 if __name__ == "__main__":

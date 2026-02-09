@@ -1,7 +1,7 @@
 import pytest
 import tempfile
 from pathlib import Path
-from c3d_parser import compute_file_hash, extract_c3d_metadata, C3DMetadata, compare_c3d_files, ComparisonResult
+from c3d_parser import compute_file_hash, extract_c3d_metadata, C3DMetadata, compare_c3d_files, ComparisonResult, EquivalenceResult
 
 
 # Unit tests with temporary files (always run)
@@ -153,7 +153,7 @@ def test_compare_identical_files():
 
     result = compare_c3d_files(test_file, test_file)
 
-    assert result.status == "match"
+    assert result.status == "byte_identical"
     assert result.hash_match is True
     assert len(result.differences) == 0
 

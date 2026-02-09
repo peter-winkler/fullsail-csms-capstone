@@ -1,137 +1,120 @@
-"""Pydantic models for dashboard data structures."""
+"""Data models for cloud acceleration cost-benefit analysis."""
 
-import uuid
-from datetime import datetime
-from enum import Enum
-from typing import Optional
-
+from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
-class ProcessingLocation(str, Enum):
-    """Where processing can occur."""
+class Event(BaseModel):
+    """One processed event from on-prem results CSV."""
 
-    ON_PREMISES = "on_premises"
-    CLOUD_AWS = "cloud_aws"
-    CLOUD_GCP = "cloud_gcp"
-    HYBRID = "hybrid"
-
-
-class JobPriority(str, Enum):
-    """Processing priority levels."""
-
-    LOW = "low"
-    NORMAL = "normal"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
-class JobStatus(str, Enum):
-    """Job processing status."""
-
-    QUEUED = "queued"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-class ProcessingJob(BaseModel):
-    """Represents a single processing job in the queue."""
-
-    job_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    game_id: str
-    team_name: str
+    event_name: str
     venue: str
-    game_date: datetime
-    pitcher_count: int = Field(ge=1, le=15)
-    total_pitches: int = Field(ge=50, le=300)
-    camera_count: int = Field(default=8, ge=6, le=16)
-    fps: int = Field(default=300)
+    venue_type: str = "mlb"
+    event_type: str  # Batting or Pitching
+    gpu_model: str = "RTX_4000_Ada"
+    processing_time_sec: float = Field(..., gt=0)
+    exit_code: int = 0
+    c3d_valid: bool = True
+    c3d_size_bytes: int = 0
+    timestamp: Optional[str] = None  # When this event was processed on-prem
 
-    # Processing metadata
-    status: JobStatus = JobStatus.QUEUED
-    priority: JobPriority = JobPriority.NORMAL
-    queued_at: datetime
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-
-    # Assignment
-    assigned_location: Optional[ProcessingLocation] = None
+    # Enrichment from event ledger join
+    session: Optional[str] = None
+    fps: Optional[float] = None  # 300 or 600 — affects processing complexity
+    s3_path: Optional[str] = None
 
 
-class CostTimeEstimate(BaseModel):
-    """Cost and time estimate for a processing configuration."""
+class EventAssignment(BaseModel):
+    """Where a single event was assigned by the scheduler."""
 
-    job_id: str
-    location: ProcessingLocation
+    event_name: str
+    event_type: str
+    processing_time_sec: float  # On-prem measured time
+    fps: Optional[float] = None
+    assigned_to: str  # "on_prem" or "cloud"
+    processor_id: int
+    effective_time_sec: float  # Actual time used (on-prem real time or cloud fixed time)
 
-    # Time estimates (hours)
-    estimated_processing_hours: float
-    estimated_queue_wait_hours: float
-    total_estimated_hours: float
 
-    # Cost estimates (USD)
-    compute_cost: float
-    storage_cost: float
-    network_egress_cost: float
-    total_cost: float
+class CloudCostModel(BaseModel):
+    """Parameterized cloud pricing model. All cloud cost assumptions in one place."""
 
-    # Resource utilization
-    gpu_utilization_percent: float
-    cpu_utilization_percent: float
-    memory_utilization_percent: float
+    instance_type: str = "g4dn.xlarge"
+    cost_per_hour: float = 0.526  # AWS on-demand
+    spot_cost_per_hour: Optional[float] = 0.16  # AWS spot estimate (~70% discount)
+    use_spot: bool = False
+    cloud_time_per_event_sec: float = 1378.0  # 23 min avg from 15-event T4 pilot (range 450-2784s)
+    container_startup_sec: float = 30.0
+    data_transfer_sec_per_event: float = 60.0
+    data_transfer_cost_per_event: float = 0.02  # S3 pricing estimate
+
+    @property
+    def effective_cost_per_hour(self) -> float:
+        """Active hourly rate based on on-demand vs spot selection."""
+        if self.use_spot and self.spot_cost_per_hour is not None:
+            return self.spot_cost_per_hour
+        return self.cost_per_hour
+
+    def event_cloud_cost(self) -> float:
+        """Total cloud cost for one event (compute + transfer)."""
+        compute_sec = self.cloud_time_per_event_sec + self.container_startup_sec
+        compute_hours = compute_sec / 3600.0
+        return compute_hours * self.effective_cost_per_hour + self.data_transfer_cost_per_event
+
+    def event_cloud_time(self) -> float:
+        """Total wall-clock time for one cloud event (processing + transfer)."""
+        return (
+            self.cloud_time_per_event_sec
+            + self.container_startup_sec
+            + self.data_transfer_sec_per_event
+        )
+
+
+class SiteProfile(BaseModel):
+    """Stadium GPU configuration for simulation."""
+
+    name: str
+    venue_code: str
+    available_gpus: int = Field(..., ge=0)
+    tier: str  # "gpu_poor", "gpu_moderate", "gpu_rich"
+
+    @classmethod
+    def gpu_poor(cls, gpus: int = 5) -> "SiteProfile":
+        return cls(name="GPU-Poor Site", venue_code="BOS", available_gpus=gpus, tier="gpu_poor")
+
+    @classmethod
+    def gpu_moderate(cls, gpus: int = 15) -> "SiteProfile":
+        return cls(name="GPU-Moderate Site", venue_code="MIA", available_gpus=gpus, tier="gpu_moderate")
+
+    @classmethod
+    def gpu_rich(cls, gpus: int = 36) -> "SiteProfile":
+        return cls(name="GPU-Rich Site", venue_code="SEA", available_gpus=gpus, tier="gpu_rich")
+
+
+class BatchResult(BaseModel):
+    """Output of one simulation run — one point in the sweep."""
+
+    config_id: str  # e.g. "G5_C10"
+    on_prem_gpus: int
+    cloud_containers: int
+    total_events: int
+    cloud_cost: float  # X axis: additional $ beyond on-prem baseline
+    turnaround_time_sec: float  # Y axis: batch wall-clock time (makespan)
+    events_on_prem: int
+    events_on_cloud: int
+    on_prem_finish_sec: float
+    cloud_finish_sec: float
+    # Per-event assignment detail (populated when track_assignments=True)
+    assignments: Optional[List[EventAssignment]] = None
 
 
 class ParetoPoint(BaseModel):
     """A point on the Pareto frontier."""
 
-    job_id: str
-    configuration_id: str
-    location: ProcessingLocation
-
-    # The two optimization axes
-    total_hours: float
-    total_cost: float
-
-    # Whether this point is on the Pareto frontier
+    config_id: str
+    cost: float
+    time: float
     is_pareto_optimal: bool = False
 
-    # Normalized scores (0-1 scale)
-    time_score: float = 0.0  # 0 = slowest, 1 = fastest
-    cost_score: float = 0.0  # 0 = most expensive, 1 = cheapest
-
-
-class ScenarioResult(BaseModel):
-    """Results for a specific processing scenario."""
-
-    scenario_name: str
-    description: str
-
-    # Aggregate metrics
-    total_jobs: int
-    total_cost: float
-    total_hours: float
-    average_cost_per_job: float
-    average_hours_per_job: float
-
-    # Job distribution
-    jobs_on_premises: int
-    jobs_cloud: int
-
-    # C3D output verification
-    c3d_outputs_match: bool = True
-
-
-class C3DVerificationResult(BaseModel):
-    """Verification that C3D outputs match between systems."""
-
-    job_id: str
-    on_premises_hash: str
-    cloud_hash: str
-    hashes_match: bool
-
-    # Detailed comparison
-    marker_count_match: bool
-    frame_count_match: bool
-    trajectory_rmse: float  # Root mean square error in mm
-    is_within_tolerance: bool  # < 0.1mm difference
+    class Config:
+        frozen = True

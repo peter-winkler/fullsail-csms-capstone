@@ -1,122 +1,93 @@
-"""Plotly chart builders for the dashboard."""
+"""Plotly chart builders for the cloud acceleration dashboard."""
 
-import sys
-from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-# Add app directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from typing import List
-
-import plotly.express as px
 import plotly.graph_objects as go
 
-from data.schemas import ParetoPoint, ProcessingJob, ScenarioResult
+from data.schemas import BatchResult, EventAssignment, ParetoPoint
 
 
-def create_pareto_chart(points: List[ParetoPoint]) -> go.Figure:
-    """
-    Create an interactive Pareto frontier chart.
+TIER_COLORS = {
+    "gpu_poor": "#e74c3c",
+    "gpu_moderate": "#f39c12",
+    "gpu_rich": "#2ecc71",
+}
 
-    Args:
-        points: List of ParetoPoints with is_pareto_optimal computed
 
-    Returns:
-        Plotly figure with all points and highlighted Pareto frontier
-    """
-    # Separate Pareto-optimal from non-optimal points
+def create_pareto_chart(
+    points: List[ParetoPoint],
+    optimal: Optional[ParetoPoint] = None,
+    title: str = "Cloud Acceleration: Cost vs. Turnaround Time",
+) -> go.Figure:
+    """Scatter plot with Pareto frontier line highlighted."""
     pareto = [p for p in points if p.is_pareto_optimal]
     non_pareto = [p for p in points if not p.is_pareto_optimal]
 
     fig = go.Figure()
 
-    # Non-optimal points (smaller, faded)
+    # Sub-optimal points
     if non_pareto:
-        fig.add_trace(
-            go.Scatter(
-                x=[p.total_cost for p in non_pareto],
-                y=[p.total_hours for p in non_pareto],
-                mode="markers",
-                name="Sub-optimal",
-                marker=dict(size=8, opacity=0.4, color="gray"),
-                hovertemplate=(
-                    "<b>%{customdata[0]}</b><br>"
-                    "Location: %{customdata[1]}<br>"
-                    "Cost: $%{x:.2f}<br>"
-                    "Time: %{y:.2f} hrs<br>"
-                    "<extra></extra>"
-                ),
-                customdata=[
-                    [p.job_id[:8], p.location.value] for p in non_pareto
-                ],
-            )
-        )
+        fig.add_trace(go.Scatter(
+            x=[p.cost for p in non_pareto],
+            y=[p.time / 3600 for p in non_pareto],
+            mode="markers",
+            name="Sub-optimal",
+            marker=dict(size=7, opacity=0.35, color="gray"),
+            hovertemplate=(
+                "<b>%{customdata}</b><br>"
+                "Cloud cost: $%{x:.2f}<br>"
+                "Turnaround: %{y:.1f} hrs<extra></extra>"
+            ),
+            customdata=[p.config_id for p in non_pareto],
+        ))
 
-    # Pareto-optimal points (larger, highlighted)
+    # Pareto frontier line + points
     if pareto:
-        # Sort by cost for the frontier line
-        pareto_sorted = sorted(pareto, key=lambda p: p.total_cost)
+        pareto_sorted = sorted(pareto, key=lambda p: p.cost)
 
-        # Frontier line
-        fig.add_trace(
-            go.Scatter(
-                x=[p.total_cost for p in pareto_sorted],
-                y=[p.total_hours for p in pareto_sorted],
-                mode="lines",
-                name="Pareto Frontier",
-                line=dict(color="red", width=2, dash="dash"),
-                hoverinfo="skip",
-            )
-        )
+        fig.add_trace(go.Scatter(
+            x=[p.cost for p in pareto_sorted],
+            y=[p.time / 3600 for p in pareto_sorted],
+            mode="lines",
+            name="Pareto Frontier",
+            line=dict(color="#3498db", width=2, dash="dash"),
+            hoverinfo="skip",
+        ))
 
-        # Color by location
-        location_colors = {
-            "on_premises": "#2ecc71",  # Green
-            "cloud_aws": "#3498db",  # Blue
-            "cloud_gcp": "#9b59b6",  # Purple
-            "hybrid": "#f39c12",  # Orange
-        }
+        fig.add_trace(go.Scatter(
+            x=[p.cost for p in pareto_sorted],
+            y=[p.time / 3600 for p in pareto_sorted],
+            mode="markers",
+            name="Pareto-Optimal",
+            marker=dict(size=10, color="#3498db", line=dict(width=1, color="white")),
+            hovertemplate=(
+                "<b>%{customdata}</b><br>"
+                "Cloud cost: $%{x:.2f}<br>"
+                "Turnaround: %{y:.1f} hrs<extra></extra>"
+            ),
+            customdata=[p.config_id for p in pareto_sorted],
+        ))
 
-        for location in ["on_premises", "cloud_aws", "cloud_gcp", "hybrid"]:
-            location_points = [p for p in pareto if p.location.value == location]
-            if location_points:
-                fig.add_trace(
-                    go.Scatter(
-                        x=[p.total_cost for p in location_points],
-                        y=[p.total_hours for p in location_points],
-                        mode="markers",
-                        name=location.replace("_", " ").title(),
-                        marker=dict(
-                            size=14,
-                            color=location_colors[location],
-                            symbol="star",
-                            line=dict(width=1, color="white"),
-                        ),
-                        hovertemplate=(
-                            "<b>%{customdata[0]}</b><br>"
-                            "Location: %{customdata[1]}<br>"
-                            "Cost: $%{x:.2f}<br>"
-                            "Time: %{y:.2f} hrs<br>"
-                            "Cost Score: %{customdata[2]:.2f}<br>"
-                            "Time Score: %{customdata[3]:.2f}<br>"
-                            "<extra></extra>"
-                        ),
-                        customdata=[
-                            [
-                                p.job_id[:8],
-                                p.location.value.replace("_", " ").title(),
-                                p.cost_score,
-                                p.time_score,
-                            ]
-                            for p in location_points
-                        ],
-                    )
-                )
+    # Highlight recommended point
+    if optimal:
+        fig.add_trace(go.Scatter(
+            x=[optimal.cost],
+            y=[optimal.time / 3600],
+            mode="markers",
+            name="Recommended",
+            marker=dict(size=16, color="#e74c3c", symbol="star", line=dict(width=2, color="white")),
+            hovertemplate=(
+                "<b>%{customdata} (Recommended)</b><br>"
+                "Cloud cost: $%{x:.2f}<br>"
+                "Turnaround: %{y:.1f} hrs<extra></extra>"
+            ),
+            customdata=[optimal.config_id],
+        ))
 
     fig.update_layout(
-        title="Cost vs. Time Trade-off Analysis (Pareto Frontier)",
-        xaxis_title="Total Cost ($)",
-        yaxis_title="Total Time (hours)",
+        title=title,
+        xaxis_title="Additional Cloud Cost ($)",
+        yaxis_title="Batch Turnaround Time (hours)",
         hovermode="closest",
         legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
         template="plotly_white",
@@ -125,134 +96,172 @@ def create_pareto_chart(points: List[ParetoPoint]) -> go.Figure:
     return fig
 
 
-def create_timeline_chart(jobs: List[ProcessingJob]) -> go.Figure:
-    """
-    Create a Gantt-style timeline of processing jobs.
-
-    Args:
-        jobs: List of ProcessingJobs with timing information
-
-    Returns:
-        Plotly figure showing job timeline
-    """
-    # Filter to jobs with timing info
-    timed_jobs = [j for j in jobs if j.started_at is not None]
-
-    if not timed_jobs:
-        fig = go.Figure()
-        fig.add_annotation(
-            text="No jobs with timing data available",
-            xref="paper",
-            yref="paper",
-            x=0.5,
-            y=0.5,
-            showarrow=False,
-        )
-        return fig
-
-    fig = px.timeline(
-        [
-            {
-                "Job": f"{j.team_name[:15]}...",
-                "Start": j.started_at,
-                "End": j.completed_at or j.started_at,
-                "Status": j.status.value,
-            }
-            for j in timed_jobs
-            if j.started_at
-        ],
-        x_start="Start",
-        x_end="End",
-        y="Job",
-        color="Status",
-        title="Processing Timeline",
-    )
-
-    fig.update_layout(template="plotly_white")
-    return fig
-
-
-def create_scenario_comparison_chart(
-    scenarios: dict[str, ScenarioResult],
+def create_multi_site_chart(
+    site_frontiers: Dict[str, Tuple[List[ParetoPoint], str]],
 ) -> go.Figure:
-    """
-    Create a grouped bar chart comparing scenarios.
+    """Overlay Pareto frontiers for multiple site profiles.
 
     Args:
-        scenarios: Dict of scenario name to ScenarioResult
-
-    Returns:
-        Plotly figure comparing cost and time across scenarios
+        site_frontiers: {label: (points, tier)} where tier is used for color.
     """
-    names = list(scenarios.keys())
-    results = list(scenarios.values())
-
     fig = go.Figure()
 
-    # Cost bars
-    fig.add_trace(
-        go.Bar(
-            name="Total Cost ($)",
-            x=[r.scenario_name for r in results],
-            y=[r.total_cost for r in results],
-            text=[f"${r.total_cost:.2f}" for r in results],
-            textposition="outside",
-            marker_color="#e74c3c",
-        )
-    )
+    for label, (points, tier) in site_frontiers.items():
+        optimal = [p for p in points if p.is_pareto_optimal]
+        if not optimal:
+            continue
+        optimal_sorted = sorted(optimal, key=lambda p: p.cost)
+        color = TIER_COLORS.get(tier, "#3498db")
 
-    # Time bars (scaled for visibility)
-    max_cost = max(r.total_cost for r in results)
-    max_time = max(r.total_hours for r in results)
-    time_scale = max_cost / max_time if max_time > 0 else 1
-
-    fig.add_trace(
-        go.Bar(
-            name="Total Time (hrs, scaled)",
-            x=[r.scenario_name for r in results],
-            y=[r.total_hours * time_scale for r in results],
-            text=[f"{r.total_hours:.1f} hrs" for r in results],
-            textposition="outside",
-            marker_color="#3498db",
-        )
-    )
+        fig.add_trace(go.Scatter(
+            x=[p.cost for p in optimal_sorted],
+            y=[p.time / 3600 for p in optimal_sorted],
+            mode="lines+markers",
+            name=label,
+            line=dict(color=color, width=2),
+            marker=dict(size=6, color=color),
+            hovertemplate=(
+                f"<b>{label}</b><br>"
+                "%{customdata}<br>"
+                "Cloud cost: $%{x:.2f}<br>"
+                "Turnaround: %{y:.1f} hrs<extra></extra>"
+            ),
+            customdata=[p.config_id for p in optimal_sorted],
+        ))
 
     fig.update_layout(
-        title="Scenario Comparison: Cost vs Time",
-        barmode="group",
+        title="Pareto Frontiers by Site GPU Configuration",
+        xaxis_title="Additional Cloud Cost ($)",
+        yaxis_title="Batch Turnaround Time (hours)",
+        hovermode="closest",
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
         template="plotly_white",
-        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
     )
 
     return fig
 
 
-def create_cost_breakdown_chart(scenario: ScenarioResult) -> go.Figure:
-    """
-    Create a pie chart showing job distribution by location.
+def create_assignment_bar(result: BatchResult) -> go.Figure:
+    """Stacked bar showing processor load balance from a single batch result."""
+    if not result.assignments:
+        fig = go.Figure()
+        fig.add_annotation(text="No assignment data (run with track_assignments=True)",
+                           xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+        return fig
 
-    Args:
-        scenario: ScenarioResult with job counts
+    # Group load by processor
+    proc_loads: Dict[int, float] = {}
+    proc_type: Dict[int, str] = {}
+    for a in result.assignments:
+        proc_loads[a.processor_id] = proc_loads.get(a.processor_id, 0) + a.effective_time_sec
+        proc_type[a.processor_id] = a.assigned_to
 
-    Returns:
-        Plotly pie chart
-    """
-    labels = ["On-Premises", "Cloud"]
-    values = [scenario.jobs_on_premises, scenario.jobs_cloud]
+    # Separate on-prem and cloud
+    on_prem_ids = sorted(pid for pid, t in proc_type.items() if t == "on_prem")
+    cloud_ids = sorted(pid for pid, t in proc_type.items() if t == "cloud")
 
-    fig = go.Figure(
-        data=[
-            go.Pie(
-                labels=labels,
-                values=values,
-                hole=0.4,
-                marker_colors=["#2ecc71", "#3498db"],
-            )
-        ]
-    )
+    labels = [f"GPU {i}" for i in range(len(on_prem_ids))] + [f"Cloud {i}" for i in range(len(cloud_ids))]
+    values = [proc_loads[pid] / 3600 for pid in on_prem_ids] + [proc_loads[pid] / 3600 for pid in cloud_ids]
+    colors = ["#2ecc71"] * len(on_prem_ids) + ["#3498db"] * len(cloud_ids)
+
+    fig = go.Figure(go.Bar(
+        x=labels,
+        y=values,
+        marker_color=colors,
+        hovertemplate="<b>%{x}</b><br>Load: %{y:.1f} hrs<extra></extra>",
+    ))
 
     fig.update_layout(
-        title=f"Job Distribution: {scenario.scenario_name}",
+        title=f"Processor Load Balance ({result.config_id})",
+        xaxis_title="Processor",
+        yaxis_title="Total Load (hours)",
+        template="plotly_white",
+    )
+
+    return fig
+
+
+def create_event_type_breakdown(assignments: List[EventAssignment]) -> go.Figure:
+    """Show how event types (Batting/Pitching) are distributed across on-prem vs cloud."""
+    categories = {}
+    for a in assignments:
+        key = (a.assigned_to, a.event_type)
+        categories[key] = categories.get(key, 0) + 1
+
+    on_prem_batting = categories.get(("on_prem", "Batting"), 0)
+    on_prem_pitching = categories.get(("on_prem", "Pitching"), 0)
+    cloud_batting = categories.get(("cloud", "Batting"), 0)
+    cloud_pitching = categories.get(("cloud", "Pitching"), 0)
+
+    fig = go.Figure(data=[
+        go.Bar(name="Batting", x=["On-Prem", "Cloud"],
+               y=[on_prem_batting, cloud_batting], marker_color="#2ecc71"),
+        go.Bar(name="Pitching", x=["On-Prem", "Cloud"],
+               y=[on_prem_pitching, cloud_pitching], marker_color="#3498db"),
+    ])
+
+    fig.update_layout(
+        title="Event Type Distribution by Location",
+        barmode="stack",
+        xaxis_title="Processing Location",
+        yaxis_title="Event Count",
+        template="plotly_white",
+    )
+
+    return fig
+
+
+def create_processing_time_histogram(assignments: List[EventAssignment]) -> go.Figure:
+    """Histogram of on-prem measured processing times, colored by assignment."""
+    on_prem = [a.processing_time_sec / 60 for a in assignments if a.assigned_to == "on_prem"]
+    cloud = [a.processing_time_sec / 60 for a in assignments if a.assigned_to == "cloud"]
+
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=on_prem, name="Assigned On-Prem", marker_color="#2ecc71", opacity=0.7, nbinsx=25))
+    fig.add_trace(go.Histogram(
+        x=cloud, name="Assigned to Cloud", marker_color="#3498db", opacity=0.7, nbinsx=25))
+
+    fig.update_layout(
+        title="Processing Time Distribution by Assignment",
+        xaxis_title="On-Prem Measured Time (minutes)",
+        yaxis_title="Event Count",
+        barmode="overlay",
+        template="plotly_white",
+    )
+
+    return fig
+
+
+def create_sensitivity_chart(
+    frontiers: Dict[str, List[ParetoPoint]],
+    param_name: str = "Parameter",
+) -> go.Figure:
+    """Overlay Pareto frontiers for different parameter values."""
+    fig = go.Figure()
+
+    colors = ["#e74c3c", "#f39c12", "#3498db", "#2ecc71", "#9b59b6", "#1abc9c"]
+
+    for i, (label, points) in enumerate(frontiers.items()):
+        optimal = sorted([p for p in points if p.is_pareto_optimal], key=lambda p: p.cost)
+        if not optimal:
+            continue
+        color = colors[i % len(colors)]
+
+        fig.add_trace(go.Scatter(
+            x=[p.cost for p in optimal],
+            y=[p.time / 3600 for p in optimal],
+            mode="lines+markers",
+            name=label,
+            line=dict(color=color, width=2),
+            marker=dict(size=5, color=color),
+        ))
+
+    fig.update_layout(
+        title=f"Sensitivity Analysis: {param_name}",
+        xaxis_title="Additional Cloud Cost ($)",
+        yaxis_title="Batch Turnaround Time (hours)",
+        hovermode="closest",
         template="plotly_white",
     )
 

@@ -1,11 +1,12 @@
 """C3D file parsing and comparison utilities."""
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
 import ezc3d
+import numpy as np
 
 
 def compute_file_hash(file_path: Path) -> str:
@@ -74,14 +75,35 @@ def extract_c3d_metadata(file_path: Path) -> C3DMetadata:
 
 
 @dataclass
+class EquivalenceResult:
+    """Four-level equivalence assessment for C3D files processed on different GPUs.
+
+    cuDNN non-determinism in convolution kernel selection means C3D files will
+    almost never be byte-identical across GPU architectures (or even same GPU).
+    This checks structural, statistical, and clinical equivalence instead.
+    """
+
+    structural_match: bool  # Same frame count, frame rate, labels
+    mean_abs_diff_mm: float  # Mean absolute difference across all frames
+    p95_max_diff_mm: float  # 95th percentile of per-frame max differences
+    statistical_pass: bool  # mean_abs_diff < 1.0mm
+    clinical_pass: bool  # p95_max_diff < 5.0mm
+    is_equivalent: bool  # structural AND statistical AND clinical all pass
+    frame_diffs: List[float] = field(default_factory=list)  # Per-frame max diffs
+
+
+@dataclass
 class ComparisonResult:
     """Result of comparing two C3D files."""
-    status: str  # "match", "mismatch", "missing_onprem", "missing_cloud", "error"
+    # "byte_identical", "equivalent", "divergent", "structural_mismatch",
+    # "missing_onprem", "missing_cloud", "error"
+    status: str
     hash_match: Optional[bool]
     onprem_metadata: Optional[C3DMetadata]
     cloud_metadata: Optional[C3DMetadata]
     differences: List[str]
     error_message: Optional[str] = None
+    equivalence: Optional[EquivalenceResult] = None
 
 
 @dataclass
@@ -170,6 +192,114 @@ def extract_point_data(file_path: Path, frame: int = 0) -> Optional[PointData]:
     )
 
 
+def _extract_all_values(c3d_data) -> Optional[np.ndarray]:
+    """Extract per-frame numeric values from a C3D object for comparison.
+
+    Returns array of shape (n_frames, n_values) or None if no data found.
+    Handles both standard point data and KinaTrax rotation matrix format.
+    """
+    header = c3d_data["header"]
+    n_frames = header["points"]["last_frame"] - header["points"]["first_frame"] + 1
+    if n_frames == 0:
+        return None
+
+    # Try standard point markers first
+    n_markers = header["points"]["size"]
+    if n_markers > 0:
+        points = c3d_data["data"]["points"]  # (4, n_markers, n_frames)
+        # Flatten x,y,z for each marker into (n_frames, n_markers*3)
+        return np.stack([
+            points[0, :, :].T,  # x: (n_frames, n_markers)
+            points[1, :, :].T,  # y
+            points[2, :, :].T,  # z
+        ], axis=-1).reshape(n_frames, -1)
+
+    # Try KinaTrax rotation matrices
+    if "rotations" in c3d_data["data"]:
+        rotations = c3d_data["data"]["rotations"]  # (4, 4, n_segments, n_frames)
+        if rotations.shape[2] > 0:
+            n_segments = rotations.shape[2]
+            # Flatten all 16 matrix elements per segment into (n_frames, n_segments*16)
+            return rotations.reshape(16, n_segments, n_frames).transpose(2, 1, 0).reshape(n_frames, -1)
+
+    return None
+
+
+def compute_frame_differences(
+    onprem_path: Path, cloud_path: Path
+) -> Optional[EquivalenceResult]:
+    """Compute per-frame differences between two C3D files.
+
+    Args:
+        onprem_path: Path to on-premises C3D file
+        cloud_path: Path to cloud-processed C3D file
+
+    Returns:
+        EquivalenceResult with structural match, statistics, and per-frame diffs,
+        or None if files can't be compared (different structure).
+    """
+    try:
+        c3d_onprem = ezc3d.c3d(str(onprem_path))
+        c3d_cloud = ezc3d.c3d(str(cloud_path))
+    except Exception:
+        return None
+
+    h_on = c3d_onprem["header"]
+    h_cl = c3d_cloud["header"]
+
+    frames_on = h_on["points"]["last_frame"] - h_on["points"]["first_frame"] + 1
+    frames_cl = h_cl["points"]["last_frame"] - h_cl["points"]["first_frame"] + 1
+
+    structural_match = (
+        frames_on == frames_cl
+        and h_on["points"]["frame_rate"] == h_cl["points"]["frame_rate"]
+        and h_on["points"]["size"] == h_cl["points"]["size"]
+    )
+
+    if not structural_match:
+        return EquivalenceResult(
+            structural_match=False,
+            mean_abs_diff_mm=float("inf"),
+            p95_max_diff_mm=float("inf"),
+            statistical_pass=False,
+            clinical_pass=False,
+            is_equivalent=False,
+        )
+
+    vals_on = _extract_all_values(c3d_onprem)
+    vals_cl = _extract_all_values(c3d_cloud)
+
+    if vals_on is None or vals_cl is None:
+        return EquivalenceResult(
+            structural_match=True,
+            mean_abs_diff_mm=0.0,
+            p95_max_diff_mm=0.0,
+            statistical_pass=True,
+            clinical_pass=True,
+            is_equivalent=True,
+        )
+
+    # Per-frame max absolute difference
+    abs_diff = np.abs(vals_on - vals_cl)
+    frame_max_diffs = abs_diff.max(axis=1)  # (n_frames,)
+
+    mean_abs = float(frame_max_diffs.mean())
+    p95 = float(np.percentile(frame_max_diffs, 95))
+
+    statistical_pass = mean_abs < 1.0
+    clinical_pass = p95 < 5.0
+
+    return EquivalenceResult(
+        structural_match=True,
+        mean_abs_diff_mm=mean_abs,
+        p95_max_diff_mm=p95,
+        statistical_pass=statistical_pass,
+        clinical_pass=clinical_pass,
+        is_equivalent=structural_pass and statistical_pass and clinical_pass,
+        frame_diffs=frame_max_diffs.tolist(),
+    )
+
+
 def compare_c3d_files(onprem_path: Path, cloud_path: Path) -> ComparisonResult:
     """Compare two C3D files for equivalence.
 
@@ -219,28 +349,51 @@ def compare_c3d_files(onprem_path: Path, cloud_path: Path) -> ComparisonResult:
 
     if hash_match:
         return ComparisonResult(
-            status="match",
+            status="byte_identical",
             hash_match=True,
             onprem_metadata=onprem_meta,
             cloud_metadata=cloud_meta,
             differences=[],
         )
 
-    # If hashes differ, find specific differences
-    differences = []
+    # Hashes differ — check structural match first
+    structural_diffs = []
     if onprem_meta.point_count != cloud_meta.point_count:
-        differences.append(f"Point count: {onprem_meta.point_count} vs {cloud_meta.point_count}")
+        structural_diffs.append(f"Point count: {onprem_meta.point_count} vs {cloud_meta.point_count}")
     if onprem_meta.frame_count != cloud_meta.frame_count:
-        differences.append(f"Frame count: {onprem_meta.frame_count} vs {cloud_meta.frame_count}")
+        structural_diffs.append(f"Frame count: {onprem_meta.frame_count} vs {cloud_meta.frame_count}")
     if onprem_meta.frame_rate != cloud_meta.frame_rate:
-        differences.append(f"Frame rate: {onprem_meta.frame_rate} vs {cloud_meta.frame_rate}")
+        structural_diffs.append(f"Frame rate: {onprem_meta.frame_rate} vs {cloud_meta.frame_rate}")
     if set(onprem_meta.marker_labels) != set(cloud_meta.marker_labels):
-        differences.append("Marker labels differ")
+        structural_diffs.append("Marker labels differ")
+
+    if structural_diffs:
+        return ComparisonResult(
+            status="structural_mismatch",
+            hash_match=False,
+            onprem_metadata=onprem_meta,
+            cloud_metadata=cloud_meta,
+            differences=structural_diffs,
+        )
+
+    # Structure matches — run quantitative equivalence analysis
+    equiv = compute_frame_differences(onprem_path, cloud_path)
+
+    if equiv and equiv.is_equivalent:
+        return ComparisonResult(
+            status="equivalent",
+            hash_match=False,
+            onprem_metadata=onprem_meta,
+            cloud_metadata=cloud_meta,
+            differences=[],
+            equivalence=equiv,
+        )
 
     return ComparisonResult(
-        status="mismatch",
+        status="divergent",
         hash_match=False,
         onprem_metadata=onprem_meta,
         cloud_metadata=cloud_meta,
-        differences=differences if differences else ["Files differ (hash mismatch)"],
+        differences=["Exceeds equivalence tolerance"],
+        equivalence=equiv,
     )

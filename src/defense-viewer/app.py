@@ -30,6 +30,12 @@ st.set_page_config(
 st.title("KinaTrax C3D Verification Viewer")
 st.markdown("*Compare on-premises vs cloud processing results*")
 
+st.info(
+    "C3D files processed on different GPU hardware are not byte-identical due to cuDNN "
+    "non-determinism in convolution kernel selection. Functional equivalence is assessed "
+    "using structural, statistical (<1mm mean), and clinical (<5mm P95) thresholds."
+)
+
 # Sidebar - Navigation
 st.sidebar.header("Select Data")
 
@@ -82,6 +88,35 @@ if cloud_c3d and cloud_c3d.exists():
 else:
     st.sidebar.warning("⚠ Cloud: Not found")
 
+def _show_frame_diff_chart(frame_diffs):
+    """Render a per-frame max difference line chart with threshold lines."""
+    fig_diff = go.Figure()
+    frames = list(range(len(frame_diffs)))
+
+    fig_diff.add_trace(go.Scatter(
+        x=frames, y=frame_diffs,
+        mode="lines",
+        line=dict(color="steelblue", width=1),
+        name="Max Diff",
+    ))
+
+    # Threshold lines
+    fig_diff.add_hline(y=1.0, line_dash="dash", line_color="green",
+                       annotation_text="Statistical (1mm)")
+    fig_diff.add_hline(y=5.0, line_dash="dash", line_color="red",
+                       annotation_text="Clinical (5mm)")
+
+    fig_diff.update_layout(
+        title="Per-Frame Max Absolute Difference",
+        xaxis_title="Frame",
+        yaxis_title="Max Difference (mm)",
+        height=300,
+        margin=dict(l=40, r=20, t=40, b=40),
+        showlegend=False,
+    )
+    st.plotly_chart(fig_diff, use_container_width=True)
+
+
 # Main content
 col1, col2 = st.columns([1, 1])
 
@@ -106,15 +141,50 @@ with col2:
     if onprem_c3d and cloud_c3d:
         result = compare_c3d_files(onprem_c3d, cloud_c3d)
 
-        if result.status == "match":
-            st.success("✓ **MATCH** - Files are identical")
+        if result.status == "byte_identical":
+            st.success("✓ **BYTE-IDENTICAL** — Files are identical (T4 deterministic run)")
             st.metric("Hash Match", "YES")
-        elif result.status == "mismatch":
-            st.error("✗ **MISMATCH** - Files differ")
+        elif result.status == "equivalent":
+            st.success("✓ **FUNCTIONALLY EQUIVALENT**")
+            eq = result.equivalence
+            if eq:
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric("Mean Diff", f"{eq.mean_abs_diff_mm:.4f} mm",
+                              delta="PASS" if eq.statistical_pass else "FAIL",
+                              delta_color="normal" if eq.statistical_pass else "inverse")
+                with m2:
+                    st.metric("P95 Max Diff", f"{eq.p95_max_diff_mm:.4f} mm",
+                              delta="PASS" if eq.clinical_pass else "FAIL",
+                              delta_color="normal" if eq.clinical_pass else "inverse")
+                with m3:
+                    st.metric("Structural", "MATCH" if eq.structural_match else "MISMATCH")
+
+                # Per-frame difference chart
+                if eq.frame_diffs:
+                    _show_frame_diff_chart(eq.frame_diffs)
+
+        elif result.status == "divergent":
+            st.warning("⚠ **FUNCTIONALLY DIVERGENT** — exceeds equivalence tolerance")
+            eq = result.equivalence
+            if eq:
+                failed = []
+                if not eq.statistical_pass:
+                    failed.append(f"Mean diff {eq.mean_abs_diff_mm:.3f} mm > 1.0 mm threshold")
+                if not eq.clinical_pass:
+                    failed.append(f"P95 diff {eq.p95_max_diff_mm:.3f} mm > 5.0 mm threshold")
+                for f in failed:
+                    st.write(f"- {f}")
+                if eq.frame_diffs:
+                    _show_frame_diff_chart(eq.frame_diffs)
+        elif result.status == "structural_mismatch":
+            st.error("✗ **STRUCTURAL MISMATCH** — files have different structure")
             for diff in result.differences:
                 st.write(f"- {diff}")
         elif result.status == "missing_cloud":
             st.warning("⚠ Cloud file not yet processed")
+        elif result.status == "missing_onprem":
+            st.error("✗ On-premises file not found")
         else:
             st.error(f"Error: {result.error_message}")
 

@@ -1,16 +1,15 @@
 """Optimization algorithms for cost/time trade-off analysis."""
 
 from .pareto import (
-    calculate_pareto_frontier_line,
     compute_pareto_frontier,
+    compute_pareto_frontier_numpy,
     find_optimal_configuration,
+    generate_cloud_sweep,
 )
-from .scenarios import calculate_all_scenarios, calculate_scenario
 
 __all__ = [
     "compute_pareto_frontier",
+    "compute_pareto_frontier_numpy",
     "find_optimal_configuration",
-    "calculate_pareto_frontier_line",
-    "calculate_scenario",
-    "calculate_all_scenarios",
+    "generate_cloud_sweep",
 ]

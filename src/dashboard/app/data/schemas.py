@@ -1,7 +1,43 @@
 """Data models for cloud acceleration cost-benefit analysis."""
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
+
+
+class InstanceType(BaseModel):
+    """AWS GPU instance type with pricing across all tiers.
+
+    RI rates are Optional — some instances (e.g. p3.2xlarge) don't offer
+    reserved pricing. Use available_pricing() to get the list of valid
+    tiers, and rate_for_pricing() returns None for unavailable tiers.
+    """
+
+    name: str           # "g4dn.xlarge"
+    gpu: str            # "Tesla T4"
+    rate_ondemand: float
+    rate_spot: float
+    rate_1yr_ri: Optional[float] = None
+    rate_3yr_ri: Optional[float] = None
+    ratio: float        # cloud/on-prem processing time ratio
+    has_real_data: bool = False
+
+    def rate_for_pricing(self, pricing: str) -> Optional[float]:
+        rates: Dict[str, Optional[float]] = {
+            "ondemand": self.rate_ondemand,
+            "spot": self.rate_spot,
+            "1yr_ri": self.rate_1yr_ri,
+            "3yr_ri": self.rate_3yr_ri,
+        }
+        return rates[pricing]
+
+    def available_pricing(self) -> List[str]:
+        """Return list of pricing tiers that are available for this instance."""
+        tiers = ["ondemand", "spot"]
+        if self.rate_1yr_ri is not None:
+            tiers.append("1yr_ri")
+        if self.rate_3yr_ri is not None:
+            tiers.append("3yr_ri")
+        return tiers
 
 
 class Event(BaseModel):
@@ -37,36 +73,89 @@ class EventAssignment(BaseModel):
 
 
 class CloudCostModel(BaseModel):
-    """Parameterized cloud pricing model. All cloud cost assumptions in one place."""
+    """Parameterized cloud pricing model. All cloud cost assumptions in one place.
+
+    Supports two modes:
+    - Fixed timing (legacy): cloud_time_per_event_sec is used directly
+    - Ratio-based timing: cloud time = ratio * on_prem_time per event
+    When ratio is set, it takes precedence over cloud_time_per_event_sec.
+    """
 
     instance_type: str = "g4dn.xlarge"
     cost_per_hour: float = 0.526  # AWS on-demand
     spot_cost_per_hour: Optional[float] = 0.16  # AWS spot estimate (~70% discount)
     use_spot: bool = False
-    cloud_time_per_event_sec: float = 1378.0  # 23 min avg from 15-event T4 pilot (range 450-2784s)
+    cloud_time_per_event_sec: float = 1378.0  # 23 min avg from 15-event T4 pilot
     container_startup_sec: float = 30.0
-    data_transfer_sec_per_event: float = 60.0
+    data_transfer_sec_per_event: float = 0.0
     data_transfer_cost_per_event: float = 0.02  # S3 pricing estimate
+    ratio: Optional[float] = None  # cloud/on-prem time ratio (e.g. 2.18 for T4)
+    pricing_tier: Optional[str] = None  # "ondemand", "spot", "1yr_ri", "3yr_ri"
 
     @property
     def effective_cost_per_hour(self) -> float:
-        """Active hourly rate based on on-demand vs spot selection."""
+        """Active hourly rate based on pricing selection."""
         if self.use_spot and self.spot_cost_per_hour is not None:
             return self.spot_cost_per_hour
         return self.cost_per_hour
 
+    def event_cloud_time_for(self, on_prem_time_sec: float) -> float:
+        """Cloud wall-clock time for one event, accounting for ratio if set.
+
+        Note: container startup is handled once per container in the scheduler
+        heap initialization, NOT per-event here.
+        """
+        if self.ratio is not None:
+            processing = self.ratio * on_prem_time_sec
+        else:
+            processing = self.cloud_time_per_event_sec
+        return processing + self.data_transfer_sec_per_event
+
+    def event_cloud_cost_for(self, on_prem_time_sec: float) -> float:
+        """Cloud cost for one event, using ratio-based or fixed timing.
+
+        Container startup cost is amortized across all events on that container,
+        not charged per-event. The scheduler handles startup time separately.
+        """
+        if self.ratio is not None:
+            processing = self.ratio * on_prem_time_sec
+        else:
+            processing = self.cloud_time_per_event_sec
+        compute_hours = processing / 3600.0
+        return compute_hours * self.effective_cost_per_hour + self.data_transfer_cost_per_event
+
     def event_cloud_cost(self) -> float:
-        """Total cloud cost for one event (compute + transfer)."""
+        """Total cloud cost for one event (compute + transfer). Legacy fixed-time mode."""
         compute_sec = self.cloud_time_per_event_sec + self.container_startup_sec
         compute_hours = compute_sec / 3600.0
         return compute_hours * self.effective_cost_per_hour + self.data_transfer_cost_per_event
 
     def event_cloud_time(self) -> float:
-        """Total wall-clock time for one cloud event (processing + transfer)."""
+        """Total wall-clock time for one cloud event. Legacy fixed-time mode."""
         return (
             self.cloud_time_per_event_sec
             + self.container_startup_sec
             + self.data_transfer_sec_per_event
+        )
+
+    @classmethod
+    def from_instance(cls, instance: "InstanceType", pricing: str, **kwargs) -> "CloudCostModel":
+        """Build a CloudCostModel from an InstanceType and pricing tier.
+
+        Raises ValueError if the pricing tier is not available for this instance.
+        """
+        rate = instance.rate_for_pricing(pricing)
+        if rate is None:
+            raise ValueError(
+                f"{pricing} pricing not available for {instance.name} ({instance.gpu})"
+            )
+        return cls(
+            instance_type=instance.name,
+            cost_per_hour=rate,
+            use_spot=False,  # rate already selected
+            ratio=instance.ratio,
+            pricing_tier=pricing,
+            **kwargs,
         )
 
 
@@ -114,7 +203,10 @@ class ParetoPoint(BaseModel):
     config_id: str
     cost: float
     time: float
+    cloud_containers: int = 0
     is_pareto_optimal: bool = False
+    instance_type: Optional[str] = None   # "g4dn.xlarge"
+    pricing_tier: Optional[str] = None    # "spot"
 
     class Config:
         frozen = True

@@ -14,7 +14,14 @@ from components.charts import (
     create_processing_time_histogram,
 )
 from config import settings
-from data.loaders import load_onprem_results, sample_game_batch, PRESET_SITE_PROFILES
+from data.loaders import (
+    INSTANCE_TYPES,
+    PRICING_LABELS,
+    PRICING_MODES,
+    PRESET_SITE_PROFILES,
+    load_onprem_results,
+    sample_game_batch,
+)
 from data.schemas import CloudCostModel, SiteProfile
 from simulation.scheduler import schedule_lpt
 
@@ -43,15 +50,36 @@ site = site_options[site_name]
 
 cloud_containers = st.sidebar.slider("Cloud Containers", 0, 50, 10)
 batch_size = st.sidebar.slider("Batch Size", 100, 1200, settings.default_batch_size, step=50)
-seed = st.sidebar.number_input("Random Seed", value=settings.default_seed, min_value=0)
 
-cloud_model = CloudCostModel()
-batch = sample_game_batch(events, batch_size, seed=seed)
+st.sidebar.divider()
+st.sidebar.subheader("Cloud Configuration")
+
+instance_options = {f"{it.gpu} ({it.name})": it for it in INSTANCE_TYPES}
+instance_label = st.sidebar.selectbox(
+    "GPU Instance Type",
+    list(instance_options.keys()),
+    index=2,  # Default to L4
+)
+selected_instance = instance_options[instance_label]
+
+available_tiers = selected_instance.available_pricing()
+pricing_tier = st.sidebar.radio(
+    "Pricing Tier",
+    available_tiers,
+    format_func=lambda x: PRICING_LABELS[x],
+    index=1 if len(available_tiers) > 1 else 0,
+)
+
+cloud_model = CloudCostModel.from_instance(selected_instance, pricing_tier)
+batch = sample_game_batch(events, batch_size)
 
 # --- Run with per-event tracking ---
 result = schedule_lpt(batch, site, cloud_containers, cloud_model, track_assignments=True)
 
 # --- Summary metrics ---
+gpu_label = selected_instance.gpu
+pricing_label = PRICING_LABELS[pricing_tier]
+
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("Config", result.config_id)
@@ -61,6 +89,8 @@ with col3:
     st.metric("Cloud Cost", f"${result.cloud_cost:.2f}")
 with col4:
     st.metric("Events on Cloud", f"{result.events_on_cloud} / {result.total_events}")
+
+st.caption(f"Cloud: {gpu_label} | {pricing_label} | Ratio: {selected_instance.ratio:.3f}x")
 
 st.divider()
 
@@ -113,7 +143,6 @@ if result.assignments:
 
     st.dataframe(df, use_container_width=True, hide_index=True, height=400)
 
-    # Stats
     cloud_events = [a for a in result.assignments if a.assigned_to == "cloud"]
     prem_events = [a for a in result.assignments if a.assigned_to == "on_prem"]
 

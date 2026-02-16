@@ -1,10 +1,10 @@
 """Pareto frontier optimization algorithms."""
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
-from data.schemas import CloudCostModel, Event, ParetoPoint, SiteProfile
+from data.schemas import CloudCostModel, Event, InstanceType, ParetoPoint, SiteProfile
 from simulation.scheduler import schedule_lpt
 
 
@@ -58,11 +58,14 @@ def compute_pareto_frontier(
                 break
 
     result = []
-    for i, (config_id, cost, time) in enumerate(points):
+    for i, pt in enumerate(points):
+        config_id, cost, time = pt[0], pt[1], pt[2]
+        cc = pt[3] if len(pt) > 3 else 0
         result.append(ParetoPoint(
             config_id=config_id,
             cost=cost,
             time=time,
+            cloud_containers=cc,
             is_pareto_optimal=pareto_optimal[i]
         ))
 
@@ -192,10 +195,94 @@ def generate_cloud_sweep(
         List of (config_id, cloud_cost, turnaround_time_sec) tuples
         suitable for compute_pareto_frontier().
     """
-    points: List[Tuple[str, float, float]] = []
+    points: List[Tuple[str, float, float, int]] = []
 
     for c in range(0, max_cloud_containers + 1, step):
         result = schedule_lpt(events, site, c, cloud_model)
-        points.append((result.config_id, result.cloud_cost, result.turnaround_time_sec))
+        points.append((result.config_id, result.cloud_cost, result.turnaround_time_sec, c))
 
     return points
+
+
+def generate_multi_instance_sweep(
+    events: List[Event],
+    site: SiteProfile,
+    instance_types: List[InstanceType],
+    pricing_modes: List[str],
+    max_cloud_containers: int = 50,
+    step: int = 1,
+) -> List[Tuple[str, float, float, str, str, int]]:
+    """Sweep all instance types x available pricing modes x container counts.
+
+    Skips pricing tiers that aren't available for a given instance
+    (e.g. p3.2xlarge has no reserved instances).
+
+    Returns:
+        List of (config_id, cost, time, instance_name, pricing, cloud_containers) tuples.
+    """
+    points: List[Tuple[str, float, float, str, str, int]] = []
+
+    for instance in instance_types:
+        available = instance.available_pricing()
+        for pricing in pricing_modes:
+            if pricing not in available:
+                continue
+            cloud_model = CloudCostModel.from_instance(instance, pricing)
+            for c in range(0, max_cloud_containers + 1, step):
+                result = schedule_lpt(events, site, c, cloud_model)
+                config_id = f"{instance.gpu}_{pricing}_C{c}"
+                points.append((
+                    config_id,
+                    result.cloud_cost,
+                    result.turnaround_time_sec,
+                    instance.name,
+                    pricing,
+                    c,
+                ))
+
+    return points
+
+
+def compute_pareto_frontier_multi(
+    points: List[Tuple],
+) -> List[ParetoPoint]:
+    """Compute Pareto frontier preserving instance/pricing metadata.
+
+    Args:
+        points: List of (config_id, cost, time, instance_name, pricing[, cloud_containers]) tuples.
+
+    Returns:
+        List of ParetoPoint objects with instance_type and pricing_tier set.
+    """
+    n = len(points)
+    if n == 0:
+        return []
+
+    costs = np.array([p[1] for p in points])
+    times = np.array([p[2] for p in points])
+
+    pareto_optimal = np.ones(n, dtype=bool)
+
+    for i in range(n):
+        if not pareto_optimal[i]:
+            continue
+        dominates = (costs <= costs[i]) & (times <= times[i]) & ((costs < costs[i]) | (times < times[i]))
+        dominates[i] = False
+        if np.any(dominates):
+            pareto_optimal[i] = False
+
+    result = []
+    for i, pt in enumerate(points):
+        config_id, cost, time, inst, pricing = pt[0], pt[1], pt[2], pt[3], pt[4]
+        cc = pt[5] if len(pt) > 5 else 0
+        result.append(ParetoPoint(
+            config_id=config_id,
+            cost=cost,
+            time=time,
+            cloud_containers=cc,
+            is_pareto_optimal=bool(pareto_optimal[i]),
+            instance_type=inst,
+            pricing_tier=pricing,
+        ))
+
+    return result

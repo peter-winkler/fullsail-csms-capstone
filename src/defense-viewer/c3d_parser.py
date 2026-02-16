@@ -295,7 +295,7 @@ def compute_frame_differences(
         p95_max_diff_mm=p95,
         statistical_pass=statistical_pass,
         clinical_pass=clinical_pass,
-        is_equivalent=structural_pass and statistical_pass and clinical_pass,
+        is_equivalent=structural_match and statistical_pass and clinical_pass,
         frame_diffs=frame_max_diffs.tolist(),
     )
 

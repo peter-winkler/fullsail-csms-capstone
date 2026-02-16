@@ -13,40 +13,67 @@ TIER_COLORS = {
     "gpu_rich": "#2ecc71",
 }
 
+INSTANCE_COLORS = {
+    "g4dn.xlarge": "#4169E1",  # blue (T4)
+    "g5.xlarge":   "#228B22",  # green (A10G)
+    "g6.xlarge":   "#FF8C00",  # orange (L4)
+    "p3.2xlarge":  "#DC143C",  # red (V100)
+}
+
+INSTANCE_GPU_LABELS = {
+    "g4dn.xlarge": "T4",
+    "g5.xlarge":   "A10G",
+    "g6.xlarge":   "L4",
+    "p3.2xlarge":  "V100",
+}
+
 
 def create_pareto_chart(
     points: List[ParetoPoint],
     optimal: Optional[ParetoPoint] = None,
     title: str = "Cloud Acceleration: Cost vs. Turnaround Time",
+    x_mode: str = "containers",
 ) -> go.Figure:
-    """Scatter plot with Pareto frontier line highlighted."""
+    """Scatter plot with Pareto frontier line highlighted.
+
+    x_mode: "containers" for Cloud Containers Added, "cost" for Additional Cloud Cost ($).
+    """
     pareto = [p for p in points if p.is_pareto_optimal]
     non_pareto = [p for p in points if not p.is_pareto_optimal]
+
+    def _x(p: ParetoPoint) -> float:
+        return p.cloud_containers if x_mode == "containers" else p.cost
+
+    def _sort_key(p: ParetoPoint) -> float:
+        return p.cloud_containers if x_mode == "containers" else p.cost
+
+    x_label = "Cloud Containers Added" if x_mode == "containers" else "Additional Cloud Cost ($)"
 
     fig = go.Figure()
 
     # Sub-optimal points
     if non_pareto:
         fig.add_trace(go.Scatter(
-            x=[p.cost for p in non_pareto],
+            x=[_x(p) for p in non_pareto],
             y=[p.time / 3600 for p in non_pareto],
             mode="markers",
             name="Sub-optimal",
             marker=dict(size=7, opacity=0.35, color="gray"),
             hovertemplate=(
-                "<b>%{customdata}</b><br>"
-                "Cloud cost: $%{x:.2f}<br>"
+                "<b>%{customdata[0]}</b><br>"
+                "Containers: %{customdata[2]}<br>"
+                "Cloud cost: $%{customdata[1]:.2f}<br>"
                 "Turnaround: %{y:.1f} hrs<extra></extra>"
             ),
-            customdata=[p.config_id for p in non_pareto],
+            customdata=[[p.config_id, p.cost, p.cloud_containers] for p in non_pareto],
         ))
 
     # Pareto frontier line + points
     if pareto:
-        pareto_sorted = sorted(pareto, key=lambda p: p.cost)
+        pareto_sorted = sorted(pareto, key=_sort_key)
 
         fig.add_trace(go.Scatter(
-            x=[p.cost for p in pareto_sorted],
+            x=[_x(p) for p in pareto_sorted],
             y=[p.time / 3600 for p in pareto_sorted],
             mode="lines",
             name="Pareto Frontier",
@@ -55,38 +82,40 @@ def create_pareto_chart(
         ))
 
         fig.add_trace(go.Scatter(
-            x=[p.cost for p in pareto_sorted],
+            x=[_x(p) for p in pareto_sorted],
             y=[p.time / 3600 for p in pareto_sorted],
             mode="markers",
             name="Pareto-Optimal",
             marker=dict(size=10, color="#3498db", line=dict(width=1, color="white")),
             hovertemplate=(
-                "<b>%{customdata}</b><br>"
-                "Cloud cost: $%{x:.2f}<br>"
+                "<b>%{customdata[0]}</b><br>"
+                "Containers: %{customdata[2]}<br>"
+                "Cloud cost: $%{customdata[1]:.2f}<br>"
                 "Turnaround: %{y:.1f} hrs<extra></extra>"
             ),
-            customdata=[p.config_id for p in pareto_sorted],
+            customdata=[[p.config_id, p.cost, p.cloud_containers] for p in pareto_sorted],
         ))
 
     # Highlight recommended point
     if optimal:
         fig.add_trace(go.Scatter(
-            x=[optimal.cost],
+            x=[_x(optimal)],
             y=[optimal.time / 3600],
             mode="markers",
             name="Recommended",
             marker=dict(size=16, color="#e74c3c", symbol="star", line=dict(width=2, color="white")),
             hovertemplate=(
-                "<b>%{customdata} (Recommended)</b><br>"
-                "Cloud cost: $%{x:.2f}<br>"
+                "<b>%{customdata[0]} (Recommended)</b><br>"
+                "Containers: %{customdata[2]}<br>"
+                "Cloud cost: $%{customdata[1]:.2f}<br>"
                 "Turnaround: %{y:.1f} hrs<extra></extra>"
             ),
-            customdata=[optimal.config_id],
+            customdata=[[optimal.config_id, optimal.cost, optimal.cloud_containers]],
         ))
 
     fig.update_layout(
         title=title,
-        xaxis_title="Additional Cloud Cost ($)",
+        xaxis_title=x_label,
         yaxis_title="Batch Turnaround Time (hours)",
         hovermode="closest",
         legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
@@ -96,25 +125,45 @@ def create_pareto_chart(
     return fig
 
 
+SITE_COLORS = [
+    "#e74c3c",  # red
+    "#3498db",  # blue
+    "#2ecc71",  # green
+    "#f39c12",  # orange
+    "#9b59b6",  # purple
+    "#1abc9c",  # teal
+]
+
+
 def create_multi_site_chart(
     site_frontiers: Dict[str, Tuple[List[ParetoPoint], str]],
+    x_mode: str = "containers",
 ) -> go.Figure:
     """Overlay Pareto frontiers for multiple site profiles.
 
     Args:
         site_frontiers: {label: (points, tier)} where tier is used for color.
+        x_mode: "containers" or "cost" for x-axis.
     """
     fig = go.Figure()
 
-    for label, (points, tier) in site_frontiers.items():
+    def _x(p: ParetoPoint) -> float:
+        return p.cloud_containers if x_mode == "containers" else p.cost
+
+    def _sort_key(p: ParetoPoint) -> float:
+        return p.cloud_containers if x_mode == "containers" else p.cost
+
+    x_label = "Cloud Containers Added" if x_mode == "containers" else "Additional Cloud Cost ($)"
+
+    for i, (label, (points, tier)) in enumerate(site_frontiers.items()):
         optimal = [p for p in points if p.is_pareto_optimal]
         if not optimal:
             continue
-        optimal_sorted = sorted(optimal, key=lambda p: p.cost)
-        color = TIER_COLORS.get(tier, "#3498db")
+        optimal_sorted = sorted(optimal, key=_sort_key)
+        color = SITE_COLORS[i % len(SITE_COLORS)]
 
         fig.add_trace(go.Scatter(
-            x=[p.cost for p in optimal_sorted],
+            x=[_x(p) for p in optimal_sorted],
             y=[p.time / 3600 for p in optimal_sorted],
             mode="lines+markers",
             name=label,
@@ -122,16 +171,17 @@ def create_multi_site_chart(
             marker=dict(size=6, color=color),
             hovertemplate=(
                 f"<b>{label}</b><br>"
-                "%{customdata}<br>"
-                "Cloud cost: $%{x:.2f}<br>"
+                "%{customdata[0]}<br>"
+                "Containers: %{customdata[1]}<br>"
+                "Cloud cost: $%{customdata[2]:.2f}<br>"
                 "Turnaround: %{y:.1f} hrs<extra></extra>"
             ),
-            customdata=[p.config_id for p in optimal_sorted],
+            customdata=[[p.config_id, p.cloud_containers, p.cost] for p in optimal_sorted],
         ))
 
     fig.update_layout(
         title="Pareto Frontiers by Site GPU Configuration",
-        xaxis_title="Additional Cloud Cost ($)",
+        xaxis_title=x_label,
         yaxis_title="Batch Turnaround Time (hours)",
         hovermode="closest",
         legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
@@ -263,6 +313,126 @@ def create_sensitivity_chart(
         yaxis_title="Batch Turnaround Time (hours)",
         hovermode="closest",
         template="plotly_white",
+    )
+
+    return fig
+
+
+def create_multi_instance_pareto_chart(
+    points: List[ParetoPoint],
+    title: str = "Multi-Instance Pareto Frontier",
+    pricing_labels: Optional[Dict[str, str]] = None,
+    x_mode: str = "cost",
+) -> go.Figure:
+    """Scatter plot with all configs, colored by GPU instance type.
+
+    Dominated points shown in gray; frontier points colored by instance type.
+    x_mode: "cost" for Additional Cloud Cost ($), "containers" for Cloud Containers Added.
+    """
+    if pricing_labels is None:
+        pricing_labels = {
+            "ondemand": "On-Demand", "spot": "Spot",
+            "1yr_ri": "1yr RI", "3yr_ri": "3yr RI",
+        }
+
+    def _x(p: ParetoPoint) -> float:
+        return p.cloud_containers if x_mode == "containers" else p.cost
+
+    x_label = "Cloud Containers Added" if x_mode == "containers" else "Additional Cloud Cost ($)"
+
+    fig = go.Figure()
+
+    dominated = [p for p in points if not p.is_pareto_optimal]
+    frontier = [p for p in points if p.is_pareto_optimal]
+
+    # Dominated points (gray)
+    if dominated:
+        fig.add_trace(go.Scatter(
+            x=[_x(p) for p in dominated],
+            y=[p.time / 3600 for p in dominated],
+            mode="markers",
+            name=f"Dominated ({len(dominated)})",
+            marker=dict(size=4, opacity=0.15, color="#AAAAAA"),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "GPU: %{customdata[1]}<br>"
+                "Pricing: %{customdata[2]}<br>"
+                "Containers: %{customdata[3]}<br>"
+                "Cost: $%{customdata[4]:.2f}<br>"
+                "Time: %{y:.1f} hrs<extra></extra>"
+            ),
+            customdata=[
+                [p.config_id,
+                 INSTANCE_GPU_LABELS.get(p.instance_type or "", p.instance_type or ""),
+                 pricing_labels.get(p.pricing_tier or "", p.pricing_tier or ""),
+                 p.cloud_containers,
+                 p.cost]
+                for p in dominated
+            ],
+        ))
+
+    # Frontier line connecting all optimal points
+    if frontier:
+        frontier_sorted = sorted(frontier, key=lambda p: _x(p))
+        fig.add_trace(go.Scatter(
+            x=[_x(p) for p in frontier_sorted],
+            y=[p.time / 3600 for p in frontier_sorted],
+            mode="lines",
+            name="Pareto Frontier",
+            line=dict(color="rgba(52, 152, 219, 0.5)", width=2, dash="dash"),
+            hoverinfo="skip",
+            showlegend=True,
+        ))
+
+    # Frontier points grouped by instance type
+    instance_groups: Dict[str, List[ParetoPoint]] = {}
+    for p in frontier:
+        key = p.instance_type or "unknown"
+        instance_groups.setdefault(key, []).append(p)
+
+    for inst_name, inst_points in instance_groups.items():
+        sorted_pts = sorted(inst_points, key=lambda p: _x(p))
+        color = INSTANCE_COLORS.get(inst_name, "#333333")
+        gpu_label = INSTANCE_GPU_LABELS.get(inst_name, inst_name)
+
+        fig.add_trace(go.Scatter(
+            x=[_x(p) for p in sorted_pts],
+            y=[p.time / 3600 for p in sorted_pts],
+            mode="markers",
+            name=f"{gpu_label} ({len(sorted_pts)})",
+            marker=dict(size=8, color=color, line=dict(width=0.5, color="white")),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "GPU: " + gpu_label + "<br>"
+                "Pricing: %{customdata[1]}<br>"
+                "Containers: %{customdata[2]}<br>"
+                "Cost: $%{customdata[3]:.2f}<br>"
+                "Time: %{y:.1f} hrs<extra></extra>"
+            ),
+            customdata=[
+                [p.config_id,
+                 pricing_labels.get(p.pricing_tier or "", p.pricing_tier or ""),
+                 p.cloud_containers,
+                 p.cost]
+                for p in sorted_pts
+            ],
+        ))
+
+    total = len(points)
+    dominated_pct = len(dominated) / total * 100 if total > 0 else 0
+
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_label,
+        yaxis_title="Batch Turnaround Time (hours)",
+        hovermode="closest",
+        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
+        template="plotly_white",
+        annotations=[dict(
+            text=f"{dominated_pct:.0f}% of {total} configs dominated",
+            xref="paper", yref="paper", x=0.02, y=0.02,
+            showarrow=False, font=dict(size=12, color="#666"),
+        )],
     )
 
     return fig

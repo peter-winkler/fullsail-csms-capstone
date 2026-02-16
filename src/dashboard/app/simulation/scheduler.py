@@ -5,9 +5,8 @@ LPT is a well-known 4/3-OPT approximation for makespan minimization
 greedily assigned to the least-loaded processor.
 
 On-prem processors use real measured times from CSV. Cloud processors use
-the fixed time from CloudCostModel (different GPU hardware: RTX 4000 Ada
-vs T4). When per-event AWS benchmarks arrive, cloud times can become
-variable too.
+variable timing: ratio x on_prem_time when CloudCostModel.ratio is set,
+or a fixed time for backward compatibility.
 """
 
 import heapq
@@ -27,6 +26,11 @@ def schedule_lpt(
 
     Uses LPT (Longest Processing Time First) to minimize makespan.
     O(N log(G+C)) where N=events, G=on-prem GPUs, C=cloud containers.
+
+    Cloud event timing uses ratio-based calculation when cloud_model.ratio
+    is set (cloud_time = ratio * on_prem_time + startup + transfer),
+    or falls back to fixed cloud_time_per_event_sec for backward
+    compatibility.
 
     Args:
         events: List of events with real processing times.
@@ -64,8 +68,8 @@ def schedule_lpt(
         load, proc_id, is_cloud = heapq.heappop(heap)
 
         if is_cloud:
-            event_time = cloud_model.event_cloud_time()
-            total_cloud_cost += cloud_model.event_cloud_cost()
+            event_time = cloud_model.event_cloud_time_for(event.processing_time_sec)
+            total_cloud_cost += cloud_model.event_cloud_cost_for(event.processing_time_sec)
             cloud_event_count += 1
         else:
             event_time = event.processing_time_sec
